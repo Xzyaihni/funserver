@@ -21,7 +21,7 @@ pub enum Error
     Unimplemented,
     WritingError(io::Error),
     DirectoryError,
-    InvalidExtension
+    InvalidExtension(Option<String>)
 }
 
 impl From<http::Error> for Error
@@ -42,13 +42,22 @@ impl fmt::Display for Error
             {
                 return write!(f, "{}", err);
             },
-            Error::Unimplemented => "unimplemented",
+            Error::Unimplemented => "unimplemented".to_owned(),
             Error::WritingError(err) =>
             {
                 return write!(f, "error writing response ({err})");
             },
-            Error::DirectoryError => "invalid path",
-            Error::InvalidExtension => "invalid extension"
+            Error::DirectoryError => "invalid path".to_owned(),
+            Error::InvalidExtension(extension) =>
+            {
+                if let Some(extension) = extension
+                {
+                    format!("invalid extension ({extension})")
+                } else
+                {
+                    "invalid extension".to_owned()
+                }
+            }
         };
 
         write!(f, "{}", error_text)
@@ -133,9 +142,14 @@ impl SmolServer
                         Err(_) => self.not_found(),
                         Ok(bytes) =>
                         {
-                            let extension = path.extension().ok_or(Error::InvalidExtension)?;
+                            let extension = path.extension()
+                                .ok_or(Error::InvalidExtension(None))?;
+
                             let content_type = http::ContentType::create(extension.to_str()
-                                .ok_or(Error::DirectoryError)?).ok_or(Error::InvalidExtension)?;
+                                .ok_or(Error::DirectoryError)?)
+                                .ok_or(Error::InvalidExtension(
+                                    extension.to_os_string().into_string().ok()
+                                ))?;
 
                             http::response(Status::Ok, content_type, &bytes)
                         }

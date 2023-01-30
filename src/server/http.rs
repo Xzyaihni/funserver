@@ -169,9 +169,14 @@ pub enum ContentType
 {
     Html,
     Javascript,
+    Css,
     Image,
     Icon,
-    Json
+    Json,
+    Opus,
+    Mpeg,
+    Ttf,
+    Woff
 }
 
 impl ContentType
@@ -182,9 +187,14 @@ impl ContentType
         {
             "html" => Some(ContentType::Html),
             "js" => Some(ContentType::Javascript),
+            "css" => Some(ContentType::Css),
             "png" => Some(ContentType::Image),
             "ico" => Some(ContentType::Icon),
             "json" => Some(ContentType::Json),
+            "opus" => Some(ContentType::Opus),
+            "mp3" => Some(ContentType::Mpeg),
+            "ttf" => Some(ContentType::Ttf),
+            "woff" => Some(ContentType::Woff),
             _ => None
         }
     }
@@ -196,9 +206,14 @@ impl ContentType
             {
                 ContentType::Html => "text/html",
                 ContentType::Javascript => "application/javascript",
+                ContentType::Css => "text/css",
                 ContentType::Image => "image/png",
                 ContentType::Icon => "image/x-icon",
-                ContentType::Json => "application/json"
+                ContentType::Json => "application/json",
+                ContentType::Opus => "audio/ogg",
+                ContentType::Mpeg => "audio/mpeg",
+                ContentType::Ttf => "font/ttf",
+                ContentType::Woff => "font/woff"
             },
         ].join("").into_bytes()
     }
