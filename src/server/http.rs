@@ -176,7 +176,8 @@ pub enum ContentType
     Opus,
     Mpeg,
     Ttf,
-    Woff
+    Woff,
+    Wasm
 }
 
 impl ContentType
@@ -195,6 +196,7 @@ impl ContentType
             "mp3" => Some(ContentType::Mpeg),
             "ttf" => Some(ContentType::Ttf),
             "woff" => Some(ContentType::Woff),
+            "wasm" => Some(ContentType::Wasm),
             _ => None
         }
     }
@@ -213,7 +215,8 @@ impl ContentType
                 ContentType::Opus => "audio/ogg",
                 ContentType::Mpeg => "audio/mpeg",
                 ContentType::Ttf => "font/ttf",
-                ContentType::Woff => "font/woff"
+                ContentType::Woff => "font/woff",
+                ContentType::Wasm => "application/wasm"
             },
         ].join("").into_bytes()
     }

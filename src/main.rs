@@ -1,6 +1,7 @@
 use std::{
     fs,
     fmt,
+    env,
     thread,
     ops::Deref,
     sync::Arc,
@@ -104,15 +105,13 @@ fn client_handler(cfg: Arc<ServerConfig>, mut stream: TcpStream) -> Result<(), A
 
 fn main()
 {
-    let port = 443;
+    let address = env::args().nth(1).unwrap_or_else(|| "0.0.0.0:443".to_owned());
 
-    let add_listener = |address| TcpListener::bind(address)
+    let listener = TcpListener::bind(address)
         .unwrap_or_else(|err|
         {
             panic!("bind error: {}", err);
         });
-
-    let listener = add_listener(format!("0.0.0.0:{port}"));
 
     let cert_raw = fs::read("cert.pem").expect("cert.pem cant be found");
     let mut cert_raw = &cert_raw[..];
