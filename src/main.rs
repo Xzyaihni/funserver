@@ -105,7 +105,7 @@ fn client_handler(cfg: Arc<ServerConfig>, mut stream: TcpStream) -> Result<(), A
 
 fn main()
 {
-    let address = env::args().nth(1).unwrap_or_else(|| "0.0.0.0:443".to_owned());
+    let address = env::args().nth(1).unwrap_or_else(|| "[::]:443".to_owned());
 
     let listener = TcpListener::bind(address)
         .unwrap_or_else(|err|
