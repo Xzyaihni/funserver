@@ -51,7 +51,7 @@ fn client_handler(cfg: Arc<ServerConfig>, mut stream: TcpStream) -> Result<(), A
     let mut tls_conn = ServerConnection::new(cfg)?;
     let mut server = SmolServer::new();
 
-    println!("connection created");
+    println!("connection created (peer: {:?})", stream.peer_addr());
     let mut last_change = Instant::now();
     loop
     {

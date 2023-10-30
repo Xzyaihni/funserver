@@ -189,7 +189,7 @@ impl ContentType
             "html" => Some(ContentType::Html),
             "js" => Some(ContentType::Javascript),
             "css" => Some(ContentType::Css),
-            "png" => Some(ContentType::Image),
+            "png" | "jpg" => Some(ContentType::Image),
             "ico" => Some(ContentType::Icon),
             "json" => Some(ContentType::Json),
             "opus" => Some(ContentType::Opus),
