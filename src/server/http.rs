@@ -132,7 +132,10 @@ impl FromStr for Request
 
         let fields = lines.filter(|line| !line.is_empty()).map(|line|
         {
-            let name_split = line.find(':').ok_or(RequestError::FieldError)?;
+            let name_split = line.find(':').or_else(||
+            {
+                line.find('=')
+            }).ok_or(RequestError::FieldError)?;
             
             let name = line[..name_split].to_owned();
             let body = line[name_split+1..].trim().to_owned();

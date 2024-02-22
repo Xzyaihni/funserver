@@ -10,11 +10,13 @@ use std::{
 
 use rustls::ServerConnection;
 
-use http::{RequestType, Status, ContentType};
+pub use http::{RequestType, Request, Status, ContentType};
+
+pub mod http;
+mod post;
 
 
-mod http;
-
+#[allow(dead_code)]
 pub enum Error
 {
     HttpError(http::Error),
@@ -22,6 +24,14 @@ pub enum Error
     WritingError(io::Error),
     DirectoryError,
     InvalidExtension(Option<String>)
+}
+
+impl From<io::Error> for Error
+{
+    fn from(value: io::Error) -> Self
+    {
+        Error::WritingError(value)
+    }
 }
 
 impl From<http::Error> for Error
@@ -77,7 +87,7 @@ impl<'a> WriterWrapper<'a>
         WriterWrapper{stream, connection}
     }
 
-    pub fn write_send(&mut self, mut buf: &[u8]) -> io::Result<()>
+    pub fn write_send(&mut self, mut buf: &[u8]) -> Result<(), Error>
     {
         let mut amount = self.connection.writer().write(buf)?;
         while amount != buf.len()
@@ -89,7 +99,9 @@ impl<'a> WriterWrapper<'a>
             amount = self.connection.writer().write(buf)?;
         }
 
-        self.connection.write_tls(self.stream).map(|_| ())
+        self.connection.write_tls(self.stream).map(|_| ())?;
+
+        Ok(())
     }
 }
 
@@ -107,7 +119,7 @@ impl SmolServer
 
     pub fn respond(&mut self, request: &[u8], writer: &mut WriterWrapper) -> Result<(), Error>
     {
-        let request: http::Request = match String::from_utf8_lossy(request).parse()
+        let request: Request = match String::from_utf8_lossy(request).parse()
         {
             Err(err) =>
             {
@@ -116,7 +128,7 @@ impl SmolServer
             Ok(value) => value
         };
 
-        let request_header = request.header;
+        let request_header = &request.header;
         match request_header.request
         {
             RequestType::Get =>
@@ -159,11 +171,11 @@ impl SmolServer
                     self.not_found()
                 };
          
-                writer.write_send(&response).map_err(|err| Error::WritingError(err))?;
+                writer.write_send(&response)?;
             },
             RequestType::Post =>
             {
-                return Err(Error::Unimplemented);
+                post::handle(writer, request)?;
             }
         }
 
