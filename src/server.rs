@@ -3,14 +3,12 @@ use std::{
     io,
     fmt,
     env,
-    net::TcpStream,
     path::{Path, PathBuf},
     io::Write
 };
 
-use rustls::ServerConnection;
-
-pub use http::{RequestType, Request, Status, ContentType};
+pub use http::{RequestType, PartialRequest, Request, Status, ContentType};
+use http::RequestState;
 
 pub mod http;
 mod post;
@@ -22,6 +20,7 @@ pub enum Error
     HttpError(http::Error),
     Unimplemented,
     WritingError(io::Error),
+    TlsError(rustls::Error),
     DirectoryError,
     InvalidExtension(Option<String>)
 }
@@ -42,6 +41,14 @@ impl From<http::Error> for Error
     }
 }
 
+impl From<rustls::Error> for Error
+{
+    fn from(value: rustls::Error) -> Self
+    {
+        Error::TlsError(value)
+    }
+}
+
 impl fmt::Display for Error
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
@@ -50,12 +57,16 @@ impl fmt::Display for Error
         {
             Error::HttpError(err) =>
             {
-                return write!(f, "{}", err);
+                return write!(f, "{err}");
             },
             Error::Unimplemented => "unimplemented".to_owned(),
             Error::WritingError(err) =>
             {
                 return write!(f, "error writing response ({err})");
+            },
+            Error::TlsError(err) =>
+            {
+                return write!(f, "tls error ({err})");
             },
             Error::DirectoryError => "invalid path".to_owned(),
             Error::InvalidExtension(extension) =>
@@ -74,39 +85,10 @@ impl fmt::Display for Error
     }
 }
 
-pub struct WriterWrapper<'a>
-{
-    stream: &'a mut TcpStream,
-    connection: &'a mut ServerConnection
-}
-
-impl<'a> WriterWrapper<'a>
-{
-    pub fn new(stream: &'a mut TcpStream, connection: &'a mut ServerConnection) -> Self
-    {
-        WriterWrapper{stream, connection}
-    }
-
-    pub fn write_send(&mut self, mut buf: &[u8]) -> Result<(), Error>
-    {
-        let mut amount = self.connection.writer().write(buf)?;
-        while amount != buf.len()
-        {
-            self.connection.writer().flush()?;
-            self.connection.write_tls(self.stream)?;
-
-            (_, buf) = buf.split_at(amount);
-            amount = self.connection.writer().write(buf)?;
-        }
-
-        self.connection.write_tls(self.stream).map(|_| ())?;
-
-        Ok(())
-    }
-}
-
 pub struct SmolServer
 {
+    partial: Option<Request>,
+    request_state: RequestState,
     alive: bool
 }
 
@@ -114,7 +96,19 @@ impl SmolServer
 {
     pub fn new() -> Self
     {
-        SmolServer{alive: true}
+        SmolServer{alive: true, partial: None, request_state: RequestState::default()}
+    }
+
+    pub fn extension_content_type(path: impl AsRef<Path>) -> Result<ContentType, Error>
+    {
+        let extension = path.as_ref().extension()
+            .ok_or(Error::InvalidExtension(None))?;
+
+        http::ContentType::create(extension.to_str()
+            .ok_or(Error::DirectoryError)?)
+            .ok_or(Error::InvalidExtension(
+                extension.to_os_string().into_string().ok()
+            ))
     }
 
     pub fn relative_path(path: impl AsRef<Path>) -> Result<PathBuf, Error>
@@ -129,9 +123,27 @@ impl SmolServer
         Ok(PathBuf::from(path))
     }
 
-    pub fn respond(&mut self, request: &[u8], writer: &mut WriterWrapper) -> Result<(), Error>
+    pub fn respond(
+        &mut self,
+        request: &[u8],
+        mut writer: impl Write
+    ) -> Result<(), Error>
     {
-        let request = Request::try_from(request)?;
+        let request = PartialRequest::parse(
+            self.partial.take(),
+            &mut self.request_state,
+            request
+        )?;
+
+        if request.is_partial
+        {
+            self.partial = Some(request.request);
+
+            return Ok(());
+        }
+
+        self.partial = None;
+        let request = request.request;
 
         let request_header = &request.header;
         match request_header.request
@@ -148,6 +160,7 @@ impl SmolServer
                 {
                     &path
                 };
+
                 let response = if path.exists()
                 {
                     match fs::read(path)
@@ -155,14 +168,7 @@ impl SmolServer
                         Err(_) => self.not_found(),
                         Ok(bytes) =>
                         {
-                            let extension = path.extension()
-                                .ok_or(Error::InvalidExtension(None))?;
-
-                            let content_type = http::ContentType::create(extension.to_str()
-                                .ok_or(Error::DirectoryError)?)
-                                .ok_or(Error::InvalidExtension(
-                                    extension.to_os_string().into_string().ok()
-                                ))?;
+                            let content_type = Self::extension_content_type(path)?;
 
                             http::response(Status::Ok, content_type, &bytes)
                         }
@@ -172,7 +178,7 @@ impl SmolServer
                     self.not_found()
                 };
          
-                writer.write_send(&response)?;
+                writer.write_all(&response)?;
             },
             RequestType::Post =>
             {
@@ -183,6 +189,7 @@ impl SmolServer
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn alive(&self) -> bool
     {
         self.alive

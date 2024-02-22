@@ -5,15 +5,16 @@ use std::{
     thread,
     ops::Deref,
     sync::Arc,
-    time::{Duration, Instant},
     io::{self, Read},
+    time::{Duration, Instant},
     net::{TcpListener, TcpStream}
 };
 
 use rustls::{
     self,
     ServerConnection,
-    server::ServerConfig
+    server::ServerConfig,
+    pki_types::PrivateKeyDer
 };
 
 use rustls_pemfile::Item;
@@ -52,10 +53,11 @@ fn client_handler(cfg: Arc<ServerConfig>, mut stream: TcpStream) -> Result<(), A
     let mut server = SmolServer::new();
 
     println!("connection created (peer: {:?})", stream.peer_addr());
+
     let mut last_change = Instant::now();
     loop
     {
-        if (Instant::now()-last_change)>Duration::from_secs(5)
+        if (Instant::now() - last_change) > Duration::from_secs(5)
         {
             break;
         }
@@ -77,7 +79,7 @@ fn client_handler(cfg: Arc<ServerConfig>, mut stream: TcpStream) -> Result<(), A
                     Err(err) => return Err(AutoError::from(err))
                 }
 
-                let mut wrapper = WriterWrapper::new(&mut stream, &mut tls_conn);
+                let mut wrapper = rustls::Stream::new(&mut tls_conn, &mut stream);
                 server.respond(&read_bytes, &mut wrapper)?;
             }
 
@@ -98,6 +100,7 @@ fn client_handler(cfg: Arc<ServerConfig>, mut stream: TcpStream) -> Result<(), A
 
         thread::sleep(Duration::from_millis(100));
     }
+
     println!("connection killed");
 
     Ok(())
@@ -116,25 +119,21 @@ fn main()
     let cert_raw = fs::read("cert.pem").expect("cert.pem cant be found");
     let mut cert_raw = &cert_raw[..];
 
-    let (cert, cert_key) = rustls_pemfile::read_all(&mut cert_raw).expect("couldnt read cert")
-        .into_iter().fold((None, None), |(cert, key), item|
+    let (cert, cert_key) = rustls_pemfile::read_all(&mut cert_raw)
+        .into_iter().map(|x| x.unwrap()).fold((None, None), |(cert, key), item|
         {
             match item
             {
                 Item::X509Certificate(new_cert) => (Some(new_cert), key),
-                Item::RSAKey(new_key) => (cert, Some(new_key)),
-                Item::PKCS8Key(new_key) => (cert, Some(new_key)),
+                Item::Pkcs1Key(new_key) => (cert, Some(PrivateKeyDer::Pkcs1(new_key))),
+                Item::Pkcs8Key(new_key) => (cert, Some(PrivateKeyDer::Pkcs8(new_key))),
                 _ => (cert, key)
             }
         });
 
-    let cert = rustls::Certificate(cert.expect("cert must contain cert"));
-    let cert_key = rustls::PrivateKey(cert_key.expect("cert must contain key"));
-
     let cfg = Arc::new(ServerConfig::builder()
-        .with_safe_defaults()
         .with_no_client_auth()
-        .with_single_cert(vec![cert], cert_key)
+        .with_single_cert(vec![cert.unwrap()], cert_key.unwrap())
         .expect("error creating certificate"));
 
     for stream in listener.incoming()

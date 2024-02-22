@@ -25,17 +25,17 @@ impl fmt::Display for Error
             {
                 match err
                 {
-                    RequestError::HeaderMissing => "no header line",
-                    RequestError::RequestTypeMissing => "request type missing",
-                    RequestError::UnknownRequestType => "unknown request type",
-                    RequestError::BodyMissing => "request header is missing body",
-                    RequestError::VersionMissing => "request header missing version",
-                    RequestError::MalformedVersion => "request header version is malformed",
-                    RequestError::InvalidMajor => "major version number is malformed",
-                    RequestError::UnsupportedMajor => "major version must be 1",
-                    RequestError::InvalidMinor => "minor version number is malformed",
-                    RequestError::FieldError => "error parsing field",
-                    RequestError::MultipartNoBoundary => "multipart request doesnt have a boundary"
+                    RequestError::HeaderMissing => "no header line".to_owned(),
+                    RequestError::RequestTypeMissing => "request type missing".to_owned(),
+                    RequestError::UnknownRequestType(x) => format!("unknown request type ({x})"),
+                    RequestError::BodyMissing => "request header is missing body".to_owned(),
+                    RequestError::VersionMissing => "request header missing version".to_owned(),
+                    RequestError::MalformedVersion => "request header version is malformed".to_owned(),
+                    RequestError::InvalidMajor => "major version number is malformed".to_owned(),
+                    RequestError::UnsupportedMajor => "major version must be 1".to_owned(),
+                    RequestError::InvalidMinor => "minor version number is malformed".to_owned(),
+                    RequestError::FieldError(x) => format!("error parsing field ({x})").to_owned(),
+                    RequestError::MultipartNoBoundary => "multipart request doesnt have a boundary".to_owned()
                 }
             }
         };
@@ -49,14 +49,14 @@ pub enum RequestError
 {
     HeaderMissing,
     RequestTypeMissing,
-    UnknownRequestType,
+    UnknownRequestType(String),
     BodyMissing,
     VersionMissing,
     MalformedVersion,
     InvalidMajor,
     UnsupportedMajor,
     InvalidMinor,
-    FieldError,
+    FieldError(String),
     MultipartNoBoundary
 }
 
@@ -80,14 +80,15 @@ pub struct RequestHeader
 pub struct RequestField
 {
     pub name: String,
-    pub body: String
+    pub body: Vec<String>
 }
 
-struct RequestState
+#[derive(Debug)]
+pub struct RequestState
 {
     boundary: Option<String>,
-    is_second_part: bool,
-    second_part_left: u32,
+    is_data_part: bool,
+    data_part_left: u32,
     data: Vec<u8>
 }
 
@@ -97,8 +98,8 @@ impl Default for RequestState
     {
         Self{
             boundary: None,
-            is_second_part: false,
-            second_part_left: 2,
+            is_data_part: false,
+            data_part_left: 2,
             data: Vec::new()
         }
     }
@@ -119,7 +120,7 @@ impl Request
         let name_split = text.find(':').or_else(||
         {
             text.find('=')
-        }).ok_or(RequestError::FieldError)?;
+        }).ok_or(RequestError::FieldError(text.to_owned()))?;
         
         let name = text[..name_split].to_owned();
         let body = text[name_split+1..].trim().to_owned();
@@ -133,15 +134,16 @@ impl Request
 
         let (name, body) = Self::parse_arg(&line_string)?;
 
+        let body: Vec<_> = body.split(';').map(|x| x.trim().to_owned()).collect();
+
         if name == "Content-Type"
         {
-            let is_multipart = body.starts_with("multipart");
+            let is_multipart = body[0].starts_with("multipart");
 
             if is_multipart
             {
-                let id = body.find(';').ok_or(RequestError::MultipartNoBoundary)?;
-
-                let new_boundary = Self::parse_arg(&body[id+1..])?;
+                let inner = body.get(1).ok_or(RequestError::MultipartNoBoundary)?;
+                let new_boundary = Self::parse_arg(&inner)?;
 
                 state.boundary = Some(new_boundary.1);
             }
@@ -163,19 +165,24 @@ impl Request
             {
                 if &line[..boundary.len()] == boundary.as_bytes()
                 {
-                    state.is_second_part = !line.ends_with(b"--");
+                    // i feel like this is overengineering but who cares
+                    let line_end = &line[boundary.len()..];
+                    let is_end = !line_end.is_empty()
+                        && &line_end[..2] == b"--";
+
+                    state.is_data_part = !is_end;
                     return None;
                 }
             }
         }
 
-        if state.is_second_part
+        if state.is_data_part
         {
-            if state.second_part_left > 0
+            if state.data_part_left > 0
             {
                 let parsed = Self::parse_normal(state, line);
 
-                state.second_part_left -= 1;
+                state.data_part_left -= 1;
 
                 return Some(parsed);
             }
@@ -189,14 +196,50 @@ impl Request
     }
 }
 
-impl TryFrom<&[u8]> for Request
+pub struct PartialRequest
 {
-    type Error = Error;
+    pub is_partial: bool,
+    pub request: Request
+}
 
-    fn try_from(s: &[u8]) -> Result<Self, Self::Error>
+impl PartialRequest
+{
+    pub fn parse(
+        partial: Option<Request>,
+        state: &mut RequestState,
+        s: &[u8]
+    ) -> Result<Self, Error>
     {
         let mut lines = s.split_inclusive(|c| *c == b'\n');
 
+        let mut request = partial.map_or_else(||
+        {
+            *state = RequestState::default();
+
+            Self::parse_non_partial(&mut lines)
+        }, Ok)?;
+
+        let fields = lines.filter(|line|
+        {
+            line.strip_suffix(b"\r\n").map(|x| !x.is_empty()).unwrap_or(true)
+        }).filter_map(|line|
+        {
+            Request::parse_single(state, line)
+        }).collect::<Result<Vec<_>, _>>()?;
+
+        request.fields.extend(fields.into_iter());
+        request.data.append(&mut state.data);
+
+        let partial = PartialRequest{
+            is_partial: state.is_data_part,
+            request
+        };
+
+        Ok(partial)
+    }
+
+    fn parse_non_partial<'a>(mut lines: impl Iterator<Item=&'a [u8]>) -> Result<Request, Error>
+    {
         let header = lines.next().ok_or(RequestError::HeaderMissing)?;
 
         let header_fields = String::from_utf8_lossy(header).into_owned();
@@ -209,7 +252,7 @@ impl TryFrom<&[u8]> for Request
         {
             "GET" => Ok(RequestType::Get),
             "POST" => Ok(RequestType::Post),
-            _ => Err(RequestError::UnknownRequestType)
+            x => Err(RequestError::UnknownRequestType(x.to_owned()))
         }?;
 
         let body = header_fields.next().ok_or(RequestError::BodyMissing)?.to_owned();
@@ -233,17 +276,9 @@ impl TryFrom<&[u8]> for Request
 
         let header = RequestHeader{request: request_type, body, version_major, version_minor};
 
-        let mut boundary = RequestState::default();
+        let request = Request{header, fields: Vec::new(), data: Vec::new()};
 
-        let fields = lines.filter(|line|
-        {
-            line.strip_suffix(b"\r\n").map(|x| !x.is_empty()).unwrap_or(true)
-        }).filter_map(|line|
-        {
-            Self::parse_single(&mut boundary, line)
-        }).collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Request{header, fields, data: boundary.data})
+        Ok(request)
     }
 }
 
@@ -273,7 +308,10 @@ pub enum ContentType
     Html,
     Javascript,
     Css,
-    Image,
+    Png,
+    Jpg,
+    Webp,
+    Gif,
     Icon,
     Json,
     Opus,
@@ -292,7 +330,10 @@ impl ContentType
             "html" => Some(ContentType::Html),
             "js" => Some(ContentType::Javascript),
             "css" => Some(ContentType::Css),
-            "png" | "jpg" => Some(ContentType::Image),
+            "png" => Some(ContentType::Png),
+            "jpg" | "jpeg" => Some(ContentType::Jpg),
+            "webp" => Some(ContentType::Webp),
+            "gif" => Some(ContentType::Gif),
             "ico" => Some(ContentType::Icon),
             "json" => Some(ContentType::Json),
             "opus" => Some(ContentType::Opus),
@@ -312,7 +353,10 @@ impl ContentType
                 ContentType::Html => "text/html",
                 ContentType::Javascript => "application/javascript",
                 ContentType::Css => "text/css",
-                ContentType::Image => "image/png",
+                ContentType::Png => "image/png",
+                ContentType::Jpg => "image/jpeg",
+                ContentType::Webp => "image/webp",
+                ContentType::Gif => "image/gif",
                 ContentType::Icon => "image/x-icon",
                 ContentType::Json => "application/json",
                 ContentType::Opus => "audio/ogg",
