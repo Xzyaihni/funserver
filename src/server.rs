@@ -4,7 +4,7 @@ use std::{
     fmt,
     env,
     net::TcpStream,
-    path::Path,
+    path::{Path, PathBuf},
     io::Write
 };
 
@@ -117,6 +117,18 @@ impl SmolServer
         SmolServer{alive: true}
     }
 
+    pub fn relative_path(path: impl AsRef<Path>) -> Result<PathBuf, Error>
+    {
+        let path = path.as_ref();
+
+        let current_folder = env::current_dir().map_err(|_| Error::DirectoryError)?;
+
+        let path = [current_folder.to_str().ok_or(Error::DirectoryError)?,
+            path.to_str().ok_or(Error::DirectoryError)?].concat();
+
+        Ok(PathBuf::from(path))
+    }
+
     pub fn respond(&mut self, request: &[u8], writer: &mut WriterWrapper) -> Result<(), Error>
     {
         let request: Request = match String::from_utf8_lossy(request).parse()
@@ -134,18 +146,14 @@ impl SmolServer
             RequestType::Get =>
             {
                 //dont open this to the internet lmao
-                let current_folder = env::current_dir().map_err(|_| Error::DirectoryError)?;
-                let path = Path::new(&request_header.body);
-
-                let path = [current_folder.to_str().ok_or(Error::DirectoryError)?,
-                    path.to_str().ok_or(Error::DirectoryError)?].concat();
+                let path = Self::relative_path(&request_header.body)?;
 
                 let path = if &request_header.body=="/"
                 {
                     Path::new("index.html")
                 } else
                 {
-                    Path::new(&path)
+                    &path
                 };
                 let response = if path.exists()
                 {
