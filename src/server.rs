@@ -131,14 +131,7 @@ impl SmolServer
 
     pub fn respond(&mut self, request: &[u8], writer: &mut WriterWrapper) -> Result<(), Error>
     {
-        let request: Request = match String::from_utf8_lossy(request).parse()
-        {
-            Err(err) =>
-            {
-                return Err(Error::from(http::Error::from(err)));
-            },
-            Ok(value) => value
-        };
+        let request = Request::try_from(request)?;
 
         let request_header = &request.header;
         match request_header.request

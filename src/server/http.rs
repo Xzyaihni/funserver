@@ -1,7 +1,4 @@
-use std::{
-    fmt,
-    str::FromStr
-};
+use std::fmt;
 
 
 #[derive(Debug)]
@@ -37,7 +34,8 @@ impl fmt::Display for Error
                     RequestError::InvalidMajor => "major version number is malformed",
                     RequestError::UnsupportedMajor => "major version must be 1",
                     RequestError::InvalidMinor => "minor version number is malformed",
-                    RequestError::FieldError => "error parsing field"
+                    RequestError::FieldError => "error parsing field",
+                    RequestError::MultipartNoBoundary => "multipart request doesnt have a boundary"
                 }
             }
         };
@@ -58,7 +56,8 @@ pub enum RequestError
     InvalidMajor,
     UnsupportedMajor,
     InvalidMinor,
-    FieldError
+    FieldError,
+    MultipartNoBoundary
 }
 
 #[derive(Debug)]
@@ -84,23 +83,127 @@ pub struct RequestField
     pub body: String
 }
 
+struct RequestState
+{
+    boundary: Option<String>,
+    is_second_part: bool,
+    second_part_left: u32,
+    data: Vec<u8>
+}
+
+impl Default for RequestState
+{
+    fn default() -> Self
+    {
+        Self{
+            boundary: None,
+            is_second_part: false,
+            second_part_left: 2,
+            data: Vec::new()
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Request
 {
     pub header: RequestHeader,
-    pub fields: Vec<RequestField>
+    pub fields: Vec<RequestField>,
+    pub data: Vec<u8>
 }
 
-impl FromStr for Request
+impl Request
 {
-    type Err = RequestError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err>
+    fn parse_arg(text: &str) -> Result<(String, String), RequestError>
     {
-        let mut lines = s.split("\r\n");
+        let name_split = text.find(':').or_else(||
+        {
+            text.find('=')
+        }).ok_or(RequestError::FieldError)?;
+        
+        let name = text[..name_split].to_owned();
+        let body = text[name_split+1..].trim().to_owned();
+
+        Ok((name, body))
+    }
+
+    fn parse_normal(state: &mut RequestState, line: &[u8]) -> Result<RequestField, RequestError>
+    {
+        let line_string = String::from_utf8_lossy(line);
+
+        let (name, body) = Self::parse_arg(&line_string)?;
+
+        if name == "Content-Type"
+        {
+            let is_multipart = body.starts_with("multipart");
+
+            if is_multipart
+            {
+                let id = body.find(';').ok_or(RequestError::MultipartNoBoundary)?;
+
+                let new_boundary = Self::parse_arg(&body[id+1..])?;
+
+                state.boundary = Some(new_boundary.1);
+            }
+        }
+
+        Ok(RequestField{name, body})
+    }
+
+    fn parse_single(
+        state: &mut RequestState,
+        line: &[u8]
+    ) -> Option<Result<RequestField, RequestError>>
+    {
+        if line.starts_with(b"--")
+        {
+            let line = &line[2..];
+
+            if let Some(boundary) = &state.boundary
+            {
+                if &line[..boundary.len()] == boundary.as_bytes()
+                {
+                    state.is_second_part = !line.ends_with(b"--");
+                    return None;
+                }
+            }
+        }
+
+        if state.is_second_part
+        {
+            if state.second_part_left > 0
+            {
+                let parsed = Self::parse_normal(state, line);
+
+                state.second_part_left -= 1;
+
+                return Some(parsed);
+            }
+
+            state.data.extend(line);
+
+            return None;
+        }
+        
+        Some(Self::parse_normal(state, line))
+    }
+}
+
+impl TryFrom<&[u8]> for Request
+{
+    type Error = Error;
+
+    fn try_from(s: &[u8]) -> Result<Self, Self::Error>
+    {
+        let mut lines = s.split_inclusive(|c| *c == b'\n');
 
         let header = lines.next().ok_or(RequestError::HeaderMissing)?;
-        let mut header_fields = header.split(' ');
+
+        let header_fields = String::from_utf8_lossy(header).into_owned();
+
+        let mut header_fields = header_fields.strip_suffix("\r\n")
+            .unwrap_or_else(|| &header_fields)
+            .split(' ');
         
         let request_type = match header_fields.next().ok_or(RequestError::RequestTypeMissing)?
         {
@@ -114,7 +217,7 @@ impl FromStr for Request
         let version = header_fields.next().ok_or(RequestError::VersionMissing)?;
         if version.len()!=8 || &version[..5]!="HTTP/"
         {
-            return Err(RequestError::MalformedVersion);
+            return Err(RequestError::MalformedVersion.into());
         }
         let mut version = version[5..].chars();
 
@@ -122,7 +225,7 @@ impl FromStr for Request
             .ok_or(RequestError::InvalidMajor)? as u8;
         if version_major!=1
         {
-            return Err(RequestError::UnsupportedMajor);
+            return Err(RequestError::UnsupportedMajor.into());
         }
 
         let version_minor = version.skip(1).next().expect("len is 8").to_digit(10)
@@ -130,20 +233,17 @@ impl FromStr for Request
 
         let header = RequestHeader{request: request_type, body, version_major, version_minor};
 
-        let fields = lines.filter(|line| !line.is_empty()).map(|line|
-        {
-            let name_split = line.find(':').or_else(||
-            {
-                line.find('=')
-            }).ok_or(RequestError::FieldError)?;
-            
-            let name = line[..name_split].to_owned();
-            let body = line[name_split+1..].trim().to_owned();
+        let mut boundary = RequestState::default();
 
-            Ok(RequestField{name, body})
+        let fields = lines.filter(|line|
+        {
+            line.strip_suffix(b"\r\n").map(|x| !x.is_empty()).unwrap_or(true)
+        }).filter_map(|line|
+        {
+            Self::parse_single(&mut boundary, line)
         }).collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Request{header, fields})
+        Ok(Request{header, fields, data: boundary.data})
     }
 }
 

@@ -7,10 +7,10 @@ use super::{http, SmolServer, Error, Status, ContentType, WriterWrapper, Request
 // but im doing my own stuff in here!
 pub fn handle(writer: &mut WriterWrapper, request: Request) -> Result<(), Error>
 {
-    let path = SmolServer::relative_path(request.header.body)?;
+    let path = SmolServer::relative_path(&request.header.body)?;
     let data = fs::read(path)?;
 
-    // dbg!(request);
+    // dbg!(request.data);
 
     let response = http::response(Status::Ok, ContentType::Html, &data);
 
