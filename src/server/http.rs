@@ -76,11 +76,18 @@ pub struct RequestHeader
     pub version_minor: u8
 }
 
-#[derive(Debug)]
-pub struct RequestField
+#[derive(Debug, Clone)]
+pub struct RequestFieldSimple
 {
     pub name: String,
-    pub body: Vec<String>
+    pub body: String
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestField
+{
+    pub this: RequestFieldSimple,
+    pub children: Vec<RequestFieldSimple>
 }
 
 #[derive(Debug)]
@@ -88,8 +95,16 @@ pub struct RequestState
 {
     boundary: Option<String>,
     is_data_part: bool,
-    data_part_left: u32,
-    data: Vec<u8>
+    is_data_part_header: bool,
+    data: Vec<DataPart>
+}
+
+impl RequestState
+{
+    fn last_data(&mut self) -> &mut DataPart
+    {
+        self.data.last_mut().unwrap()
+    }
 }
 
 impl Default for RequestState
@@ -99,7 +114,25 @@ impl Default for RequestState
         Self{
             boundary: None,
             is_data_part: false,
-            data_part_left: 2,
+            is_data_part_header: false,
+            data: Vec::new()
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct DataPart
+{
+    pub fields: Vec<RequestField>,
+    pub data: Vec<u8>
+}
+
+impl DataPart
+{
+    pub fn new() -> Self
+    {
+        Self{
+            fields: Vec::new(),
             data: Vec::new()
         }
     }
@@ -110,12 +143,12 @@ pub struct Request
 {
     pub header: RequestHeader,
     pub fields: Vec<RequestField>,
-    pub data: Vec<u8>
+    pub data: Vec<DataPart>
 }
 
 impl Request
 {
-    fn parse_arg(text: &str) -> Result<(String, String), RequestError>
+    fn parse_arg(text: &str) -> Result<RequestFieldSimple, RequestError>
     {
         let name_split = text.find(':').or_else(||
         {
@@ -125,31 +158,55 @@ impl Request
         let name = text[..name_split].to_owned();
         let body = text[name_split+1..].trim().to_owned();
 
-        Ok((name, body))
+        let body = if body.starts_with('"') && body.ends_with('"')
+        {
+            (&body[1..body.len() - 1]).to_owned()
+        } else
+        {
+            body
+        };
+
+        Ok(RequestFieldSimple{name, body})
     }
 
     fn parse_normal(state: &mut RequestState, line: &[u8]) -> Result<RequestField, RequestError>
     {
         let line_string = String::from_utf8_lossy(line);
 
-        let (name, body) = Self::parse_arg(&line_string)?;
+        let simple = Self::parse_arg(&line_string)?;
 
-        let body: Vec<_> = body.split(';').map(|x| x.trim().to_owned()).collect();
+        let name = simple.name;
+
+        let body;
+        let children;
+        if name == "User-Agent"
+        {
+            body = simple.body;
+            children = Vec::new();
+        } else
+        {
+            let mut bodies = simple.body.split(';').map(|x| x.trim().to_owned());
+
+            body = bodies.next().expect("must have at least one body");
+
+            children = bodies.map(|body|
+            {
+                Self::parse_arg(&body)
+            }).collect::<Result<Vec<_>, _>>()?;
+        };
 
         if name == "Content-Type"
         {
-            let is_multipart = body[0].starts_with("multipart");
+            let is_multipart = body.starts_with("multipart");
 
             if is_multipart
             {
-                let inner = body.get(1).ok_or(RequestError::MultipartNoBoundary)?;
-                let new_boundary = Self::parse_arg(&inner)?;
-
-                state.boundary = Some(new_boundary.1);
+                let inner = children.get(0).ok_or(RequestError::MultipartNoBoundary)?;
+                state.boundary = Some(inner.body.clone());
             }
         }
 
-        Ok(RequestField{name, body})
+        Ok(RequestField{this: RequestFieldSimple{name, body}, children})
     }
 
     fn parse_single(
@@ -170,6 +227,23 @@ impl Request
                     let is_end = !line_end.is_empty()
                         && &line_end[..2] == b"--";
 
+                    if !state.data.is_empty()
+                    {
+                        let last_data = &mut state.last_data().data;
+
+                        if &last_data[last_data.len()-2..] == b"\r\n"
+                        {
+                            last_data.truncate(last_data.len() - 2);
+                        }
+                    }
+
+                    if !is_end
+                    {
+                        state.data.push(DataPart::new());
+
+                        state.is_data_part_header = true;
+                    }
+
                     state.is_data_part = !is_end;
                     return None;
                 }
@@ -178,17 +252,33 @@ impl Request
 
         if state.is_data_part
         {
-            if state.data_part_left > 0
+            if state.is_data_part_header
             {
-                let parsed = Self::parse_normal(state, line);
+                if line == b"\r\n"
+                {
+                    state.is_data_part_header = false;
+                    return None;
+                }
 
-                state.data_part_left -= 1;
+                let parsed = match Self::parse_normal(state, line)
+                {
+                    Ok(x) => x,
+                    x => return Some(x)
+                };
+                
+                state.last_data().fields.push(parsed);
 
-                return Some(parsed);
+                return None;
             }
 
-            state.data.extend(line);
+            state.last_data().data.extend(line);
 
+            return None;
+        }
+
+        let line = line.strip_suffix(b"\r\n").unwrap_or(line);
+        if line.is_empty()
+        {
             return None;
         }
         
@@ -219,16 +309,17 @@ impl PartialRequest
             Self::parse_non_partial(&mut lines)
         }, Ok)?;
 
-        let fields = lines.filter(|line|
-        {
-            line.strip_suffix(b"\r\n").map(|x| !x.is_empty()).unwrap_or(true)
-        }).filter_map(|line|
+        let fields = lines.filter_map(|line|
         {
             Request::parse_single(state, line)
         }).collect::<Result<Vec<_>, _>>()?;
 
-        request.fields.extend(fields.into_iter());
-        request.data.append(&mut state.data);
+        if !state.is_data_part
+        {
+            request.fields.extend(fields.into_iter());
+
+            request.data.append(&mut state.data);
+        }
 
         let partial = PartialRequest{
             is_partial: state.is_data_part,
