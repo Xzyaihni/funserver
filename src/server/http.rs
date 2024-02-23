@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt,
+    num::ParseIntError
+};
 
 
 #[derive(Debug)]
@@ -34,8 +37,8 @@ impl fmt::Display for Error
                     RequestError::InvalidMajor => "major version number is malformed".to_owned(),
                     RequestError::UnsupportedMajor => "major version must be 1".to_owned(),
                     RequestError::InvalidMinor => "minor version number is malformed".to_owned(),
-                    RequestError::FieldError(x) => format!("error parsing field ({x})").to_owned(),
-                    RequestError::MultipartNoBoundary => "multipart request doesnt have a boundary".to_owned()
+                    RequestError::MultipartNoBoundary => "multipart request doesnt have a boundary".to_owned(),
+                    RequestError::ParseIntError(x) => format!("error parsing integer ({x})")
                 }
             }
         };
@@ -56,8 +59,16 @@ pub enum RequestError
     InvalidMajor,
     UnsupportedMajor,
     InvalidMinor,
-    FieldError(String),
-    MultipartNoBoundary
+    MultipartNoBoundary,
+    ParseIntError(ParseIntError)
+}
+
+impl From<ParseIntError> for RequestError
+{
+    fn from(value: ParseIntError) -> Self
+    {
+        Self::ParseIntError(value)
+    }
 }
 
 #[derive(Debug)]
@@ -94,6 +105,7 @@ pub struct RequestField
 pub struct RequestState
 {
     boundary: Option<String>,
+    content_length: usize,
     is_data_part: bool,
     is_data_part_header: bool,
     data: Vec<DataPart>
@@ -101,6 +113,24 @@ pub struct RequestState
 
 impl RequestState
 {
+    fn is_partial(&self) -> bool
+    {
+        self.boundary.is_some()
+    }
+
+    fn consume_length(&mut self, amount: usize) -> Option<usize>
+    {
+        if amount > self.content_length
+        {
+            Some(self.content_length)
+        } else
+        {
+            self.content_length -= amount;
+
+            None
+        }
+    }
+
     fn last_data(&mut self) -> &mut DataPart
     {
         self.data.last_mut().unwrap()
@@ -113,6 +143,7 @@ impl Default for RequestState
     {
         Self{
             boundary: None,
+            content_length: 0,
             is_data_part: false,
             is_data_part_header: false,
             data: Vec::new()
@@ -150,23 +181,27 @@ impl Request
 {
     fn parse_arg(text: &str) -> Result<RequestFieldSimple, RequestError>
     {
-        let name_split = text.find(':').or_else(||
+        if let Some(name_split) = text.find(':').or_else(||
         {
             text.find('=')
-        }).ok_or(RequestError::FieldError(text.to_owned()))?;
-        
-        let name = text[..name_split].to_owned();
-        let body = text[name_split+1..].trim().to_owned();
-
-        let body = if body.starts_with('"') && body.ends_with('"')
+        })
         {
-            (&body[1..body.len() - 1]).to_owned()
+            let name = text[..name_split].to_owned();
+            let body = text[name_split+1..].trim().to_owned();
+
+            let body = if body.starts_with('"') && body.ends_with('"')
+            {
+                (&body[1..body.len() - 1]).to_owned()
+            } else
+            {
+                body
+            };
+
+            Ok(RequestFieldSimple{name, body})
         } else
         {
-            body
-        };
-
-        Ok(RequestFieldSimple{name, body})
+            Ok(RequestFieldSimple{name: String::new(), body: text.to_owned()})
+        }
     }
 
     fn parse_normal(state: &mut RequestState, line: &[u8]) -> Result<RequestField, RequestError>
@@ -177,23 +212,14 @@ impl Request
 
         let name = simple.name;
 
-        let body;
-        let children;
-        if name == "User-Agent"
-        {
-            body = simple.body;
-            children = Vec::new();
-        } else
-        {
-            let mut bodies = simple.body.split(';').map(|x| x.trim().to_owned());
+        let mut bodies = simple.body.split(';').map(|x| x.trim().to_owned());
 
-            body = bodies.next().expect("must have at least one body");
+        let body = bodies.next().expect("must have at least one body");
 
-            children = bodies.map(|body|
-            {
-                Self::parse_arg(&body)
-            }).collect::<Result<Vec<_>, _>>()?;
-        };
+        let children = bodies.map(|body|
+        {
+            Self::parse_arg(&body)
+        }).collect::<Result<Vec<_>, _>>()?;
 
         if name == "Content-Type"
         {
@@ -207,6 +233,39 @@ impl Request
         }
 
         Ok(RequestField{this: RequestFieldSimple{name, body}, children})
+    }
+
+    fn parse_data<'a>(
+        state: &mut RequestState,
+        mut line: &'a [u8]
+    ) -> Result<Option<&'a [u8]>, RequestError>
+    {
+        let mut leftover_line = None;
+
+        if let Some(leftover) = state.consume_length(line.len())
+        {
+            leftover_line = Some(&line[leftover..]);
+            line = &line[..leftover];
+        }
+
+        if state.is_data_part_header
+        {
+            if line == b"\r\n"
+            {
+                state.is_data_part_header = false;
+                return Ok(leftover_line);
+            }
+
+            let parsed = Self::parse_normal(state, line)?;
+            
+            state.last_data().fields.push(parsed);
+
+            return Ok(leftover_line);
+        }
+
+        state.last_data().data.extend(line);
+
+        Ok(leftover_line)
     }
 
     fn parse_single(
@@ -224,7 +283,7 @@ impl Request
                 {
                     // i feel like this is overengineering but who cares
                     let line_end = &line[boundary.len()..];
-                    let is_end = !line_end.is_empty()
+                    let is_end = (line_end.len() >= 2)
                         && &line_end[..2] == b"--";
 
                     if !state.data.is_empty()
@@ -244,6 +303,11 @@ impl Request
                         state.is_data_part_header = true;
                     }
 
+                    if is_end
+                    {
+                        state.boundary = None;
+                    }
+
                     state.is_data_part = !is_end;
                     return None;
                 }
@@ -252,26 +316,16 @@ impl Request
 
         if state.is_data_part
         {
-            if state.is_data_part_header
+            let leftover = match Self::parse_data(state, line)
             {
-                if line == b"\r\n"
-                {
-                    state.is_data_part_header = false;
-                    return None;
-                }
+                Ok(x) => x,
+                Err(x) => return Some(Err(x))
+            };
 
-                let parsed = match Self::parse_normal(state, line)
-                {
-                    Ok(x) => x,
-                    x => return Some(x)
-                };
-                
-                state.last_data().fields.push(parsed);
-
-                return None;
+            if let Some(leftover) = leftover
+            {
+                return Self::parse_single(state, leftover);
             }
-
-            state.last_data().data.extend(line);
 
             return None;
         }
@@ -281,8 +335,25 @@ impl Request
         {
             return None;
         }
-        
-        Some(Self::parse_normal(state, line))
+
+        let parsed = match Self::parse_normal(state, line)
+        {
+            Ok(x) => x,
+            x => return Some(x)
+        };
+
+        if parsed.this.name == "Content-Length"
+        {
+            let content_length: usize = match parsed.this.body.parse()
+            {
+                Ok(x) => x,
+                Err(x) => return Some(Err(x.into()))
+            };
+
+            state.content_length = content_length;
+        }
+
+        Some(Ok(parsed))
     }
 }
 
@@ -322,7 +393,7 @@ impl PartialRequest
         }
 
         let partial = PartialRequest{
-            is_partial: state.is_data_part,
+            is_partial: state.is_partial(),
             request
         };
 
