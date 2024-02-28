@@ -279,7 +279,10 @@ impl Request
 
             if let Some(boundary) = &state.boundary
             {
-                if &line[..boundary.len()] == boundary.as_bytes()
+                let is_boundary = line.len() >= boundary.len()
+                    && &line[..boundary.len()] == boundary.as_bytes();
+
+                if is_boundary
                 {
                     // i feel like this is overengineering but who cares
                     let line_end = &line[boundary.len()..];
