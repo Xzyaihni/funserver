@@ -78,6 +78,7 @@ pub enum RequestType
     Get
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RequestHeader
 {
@@ -257,7 +258,7 @@ impl Request
             }
 
             let parsed = Self::parse_normal(state, line)?;
-            
+
             state.last_data().fields.push(parsed);
 
             return Ok(leftover_line);
@@ -412,7 +413,7 @@ impl PartialRequest
         let mut header_fields = header_fields.strip_suffix("\r\n")
             .unwrap_or_else(|| &header_fields)
             .split(' ');
-        
+
         let request_type = match header_fields.next().ok_or(RequestError::RequestTypeMissing)?
         {
             "GET" => Ok(RequestType::Get),
@@ -489,26 +490,26 @@ pub enum ContentType
 
 impl ContentType
 {
-    pub fn create(extension: &str) -> Option<Self>
+    pub fn create(extension: &str) -> Self
     {
         match extension
         {
-            "html" => Some(ContentType::Html),
-            "js" => Some(ContentType::Javascript),
-            "css" => Some(ContentType::Css),
-            "png" => Some(ContentType::Png),
-            "jpg" | "jpeg" => Some(ContentType::Jpg),
-            "webp" => Some(ContentType::Webp),
-            "gif" => Some(ContentType::Gif),
-            "txt" => Some(ContentType::Txt),
-            "ico" => Some(ContentType::Icon),
-            "json" => Some(ContentType::Json),
-            "opus" => Some(ContentType::Opus),
-            "mp3" => Some(ContentType::Mpeg),
-            "ttf" => Some(ContentType::Ttf),
-            "woff" => Some(ContentType::Woff),
-            "wasm" => Some(ContentType::Wasm),
-            _ => None
+            "html" => ContentType::Html,
+            "js" => ContentType::Javascript,
+            "css" => ContentType::Css,
+            "png" => ContentType::Png,
+            "jpg" | "jpeg" => ContentType::Jpg,
+            "webp" => ContentType::Webp,
+            "gif" => ContentType::Gif,
+            "txt" => ContentType::Txt,
+            "ico" => ContentType::Icon,
+            "json" => ContentType::Json,
+            "opus" => ContentType::Opus,
+            "mp3" => ContentType::Mpeg,
+            "ttf" => ContentType::Ttf,
+            "woff" => ContentType::Woff,
+            "wasm" => ContentType::Wasm,
+            _ => ContentType::Txt
         }
     }
 

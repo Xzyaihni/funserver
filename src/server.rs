@@ -21,8 +21,7 @@ pub enum Error
     Unimplemented,
     WritingError(io::Error),
     TlsError(rustls::Error),
-    DirectoryError,
-    InvalidExtension(Option<String>)
+    DirectoryError
 }
 
 impl From<io::Error> for Error
@@ -68,17 +67,7 @@ impl fmt::Display for Error
             {
                 return write!(f, "tls error ({err})");
             },
-            Error::DirectoryError => "invalid path".to_owned(),
-            Error::InvalidExtension(extension) =>
-            {
-                if let Some(extension) = extension
-                {
-                    format!("invalid extension ({extension})")
-                } else
-                {
-                    "invalid extension".to_owned()
-                }
-            }
+            Error::DirectoryError => "invalid path".to_owned()
         };
 
         write!(f, "{}", error_text)
@@ -101,14 +90,13 @@ impl SmolServer
 
     pub fn extension_content_type(path: impl AsRef<Path>) -> Result<ContentType, Error>
     {
-        let extension = path.as_ref().extension()
-            .ok_or(Error::InvalidExtension(None))?;
-
-        http::ContentType::create(extension.to_str()
-            .ok_or(Error::DirectoryError)?)
-            .ok_or(Error::InvalidExtension(
-                extension.to_os_string().into_string().ok()
-            ))
+        if let Some(extension) = path.as_ref().extension()
+        {
+            Ok(http::ContentType::create(extension.to_str().ok_or(Error::DirectoryError)?))
+        } else
+        {
+            Ok(http::ContentType::Txt)
+        }
     }
 
     pub fn relative_path(path: impl AsRef<Path>) -> Result<PathBuf, Error>
@@ -134,6 +122,11 @@ impl SmolServer
             &mut self.request_state,
             request
         )?;
+
+        if env::var("PRINT_REQUESTS").is_ok()
+        {
+            eprintln!("{:#?}", &request.request);
+        }
 
         if request.is_partial
         {
@@ -177,7 +170,7 @@ impl SmolServer
                 {
                     self.not_found()
                 };
-         
+
                 writer.write_all(&response)?;
             },
             RequestType::Post =>
